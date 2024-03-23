@@ -31,15 +31,24 @@ runs:
   using: "composite"
   steps:
     - name: "Set Repository Variables"
-      shell: bash
-      run: |
-        echo "ORGANIZATION_PROVIDER=$(if [[ $GITHUB_SERVER_URL == "https://github.com" ]]; then echo "gh"; else echo "ghe"; fi)" >> $GITHUB_ENV
-        echo "OWNER_NAME=$(echo $GITHUB_REPOSITORY | cut -d '/' -f 1)" >> $GITHUB_ENV
-        echo "REPOSITORY_NAME=$(echo $GITHUB_REPOSITORY | cut -d '/' -f 2)" >> $GITHUB_ENV
-        echo "CODACY_REPORTER_VERSION=$(if [ -n "${{ inputs.coverage-reporter-version }}" ]; then echo "${{ inputs.coverage-reporter-version }}"; fi)" >> $GITHUB_ENV
+      uses: actions/github-script@v7
+      env:
+        INPUT_COVERAGE-REPORTER-VERSION: ${{ inputs.coverage-reporter-version }}
+      with:
+        script: |
+          const {GITHUB_SERVER_URL} = process.env;
+          
+          core.exportVariable('ORGANIZATION_PROVIDER', 'https://github.com' === GITHUB_SERVER_URL ? 'gh' : 'ghe');
+          core.exportVariable('OWNER_NAME', github.context.repo.owner);
+          core.exportVariable('REPOSITORY_NAME', github.context.repo.repo);
 
-    - name: Build uploader options
-      id: build-uploader-options
+          const coverageReporterVersion = core.getInput('coverage-reporter-version', {trimWhitespace: false});
+          if (coverageReporterVersion.length > 0) {
+              core.exportVariable('CODACY_REPORTER_VERSION', coverageReporterVersion);
+          }
+
+    - name: Build reporter params
+      id: build-reporter-params
       uses: actions/github-script@v7
       env:
         INPUT_COVERAGE-REPORTS: ${{ inputs.coverage-reports }}
@@ -48,53 +57,53 @@ runs:
         INPUT_LANGUAGE: ${{ inputs.language }}
         INPUT_FORCE-COVERAGE-PARSER: ${{ inputs.force-coverage-parser }}
         INPUT_FORCE-COMMIT-SHA: ${{ inputs.force-commit-sha }}
-        INPUT_COVERAGE_REPORTER_VERSION
       with:
         script: |
           core.info('Welcome to Coverage-Reporter-Action');
+          
           // Authent
-          const reports = core.getInput('coverage-reports');
-          if (core.getInput('api-token').length > 0 ) {
-            core.setOutput('reports-param', reports.split(',').map(reportPath => "-r '" + reportPath + "'").join(' '); 
+          const apiToken = core.getInput('api-token', {trimWhitespace: false});
+          if (apiToken.length > 0 ) {
+              const {ORGANIZATION_PROVIDER, OWNER_NAME, REPOSITORY_NAME} = process.env;
+              core.setOutput('auth-params',
+                  [
+                      "--api-token '" + apiToken + "'",
+                      "--organization-provider '" + ORGANIZATION_PROVIDER + "'",
+                      "--username '" + OWNER_NAME + "'",
+                      "--project-name '" + REPOSITORY_NAME + "'"
+                  ].join(' ')
+              );
           }
-
-          const reports = core.getInput('coverage-reports', {});
-          if (reports.trim().length > 0 ) {
-            core.setOutput('reports-param', reports.split(',').map(reportPath => "-r '" + reportPath + "'").join(' '); 
+          const projectToken = core.getInput('project-token', {trimWhitespace: false});
+          if (projectToken.length > 0 ) {
+              core.setOutput('auth-params', coverageReports.split(',').map(rPath => "-r '" + rPath + "'").join(' '));
           }
-          core.setOutput('repo-param', metadata.reportPaths.split(',').map(v => "-r '" + v + "'").join(' ')); // Trusted paths as they come from trusted metadata (=from `reports-group/load-metadata`)
-          if (COMMIT.trim().length > 0) {
-            core.setOutput('commit-param', "--commit-uuid '" + COMMIT + "'");
+          
+          const paramList = [];
+          const language = core.getInput('language', {trimWhitespace: false});
+          if (language.length > 0 ) {
+              paramList.push("--language '" + language + "'");
           }
+          const forceCoverageParser = core.getInput('force-coverage-parser', {trimWhitespace: false});
+          if (forceCoverageParser.length > 0 ) {
+              paramList.push("--force-coverage-parser '" + forceCoverageParser + "'");
+          }
+          const forceCommitSha = core.getInput('force-commit-sha-param', {trimWhitespace: false});
+          if (forceCommitSha.length > 0) {
+              paramList.push( "--commit-uuid '" + forceCommitSha + "'");
+          }
+          const coverageReports = core.getInput('coverage-reports', {trimWhitespace: false});
+          if (coverageReports.trim().length > 0 ) {
+              paramList.push(coverageReports.split(',').map(reportPath => "-r '" + reportPath + "'").join(' '));
+          }
+          
+          core.setOutput('report-params', paramList.join(' '));
 
-    - name: "Run coverage-reporter"
-      shell: bash
-      run: |
-        echo "Welcome to Coverage-Reporter-Action"
-        
-        set -eux
-
-        report_list=''
-        # comma separated list of report files
-        if [ -n "${{ inputs.coverage-reports }}" ]; then report_list="${{ inputs.coverage-reports }}"; fi
-
-        IFS=','
-        report_array=$report_list
-        params=''
-        for report in $report_array
-        do
-            if [ ! -z "$report" ]
-            then
-                params="$params -r $report"
-            fi
-        done
-
-        auth=''
-        if [ -n "${{ inputs.api-token }}" ]; then auth="--api-token ${{ inputs.api-token }} --organization-provider $ORGANIZATION_PROVIDER --username $OWNER_NAME --project-name $REPOSITORY_NAME"; fi
-        if [ -n "${{ inputs.project-token }}" ]; then auth="--project-token ${{ inputs.project-token }}"; fi
-        if [ -n "${{ inputs.force-coverage-parser }}" ]; then force_parser="--force-coverage-parser ${{ inputs.force-coverage-parser }}"; else force_parser=""; fi
-        if [ -n "${{ inputs.language }}" ]; then lang="--language ${{ inputs.language }}"; else lang=""; fi
-        if [ -n '${{ inputs.force-commit-sha }}' ]; then force_commit='--commit-uuid '"'"${{ inputs.force-commit-sha }}"'"'; else force_commit=""; fi
-
-        bash <(curl -Ls https://coverage.codacy.com/get.sh) report $lang $force_parser $force_commit $auth $params --partial &&\
-        bash <(curl -Ls https://coverage.codacy.com/get.sh) final $auth
+      - name: "Run coverage-reporter"
+        shell: bash
+        env:
+          AUTH_PARAMS: ${{ steps.build-reporter-params.output.auth-params }}
+          REPORT_PARAMS: ${{ steps.build-reporter-params.output.report-params }}
+        run: |
+          bash <(curl -Ls https://coverage.codacy.com/get.sh) report $AUTH_PARAMS $REPORT_PARAMS --partial &&\
+          bash <(curl -Ls https://coverage.codacy.com/get.sh) final $AUTH_PARAMS
